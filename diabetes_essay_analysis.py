@@ -28,6 +28,7 @@ from sklearn.metrics import (
     roc_curve,
     precision_recall_curve,
 )
+
 try:
     from scipy.stats import ks_2samp
 except ImportError:
@@ -75,6 +76,12 @@ FIGURE_DIR.mkdir(parents=True, exist_ok=True)
 
 RANDOM_STATE = 42
 TEST_SIZE = 0.20
+
+# These constants are stated explicitly so that the code matches the essay text.
+JS_BINS = 20
+EDA_HIST_BINS = 25
+PERMUTATION_REPEATS = 30
+THRESHOLDS = [0.30, 0.40, 0.50]
 
 FEATURES = [
     "Pregnancies",
@@ -203,11 +210,14 @@ def format_metrics(y_true, y_pred, y_proba) -> dict:
     }
 
 
-def empirical_js_divergence(x0: np.ndarray, x1: np.ndarray, bins: int = 20) -> float:
+def empirical_js_divergence(x0: np.ndarray, x1: np.ndarray, bins: int = JS_BINS) -> float:
     """
     Calculate empirical Jensen-Shannon divergence between two distributions.
 
     The distributions are approximated using histograms with common bin edges.
+    Empty probability bins are handled by evaluating the KL summation only over
+    bins with positive probability mass in the numerator. This avoids undefined
+    log terms without adding an epsilon constant.
     """
     x0 = np.asarray(x0)
     x1 = np.asarray(x1)
@@ -421,15 +431,13 @@ print(round_table(cleaning_summary_df, 4).to_string(index=False))
 # 5. EDA figures: class-conditional distributions
 # ============================================================
 
-
-
 def plot_class_conditional_distribution(feature: str, filename: str) -> None:
     """Plot and save one class-conditional distribution figure."""
     plt.figure(figsize=(5.5, 4))
 
     plt.hist(
         clean_df.loc[clean_df[TARGET] == 0, feature],
-        bins=25,
+        bins=EDA_HIST_BINS,
         density=True,
         alpha=0.6,
         label="Non-diabetic (Outcome = 0)",
@@ -437,7 +445,7 @@ def plot_class_conditional_distribution(feature: str, filename: str) -> None:
 
     plt.hist(
         clean_df.loc[clean_df[TARGET] == 1, feature],
-        bins=25,
+        bins=EDA_HIST_BINS,
         density=True,
         alpha=0.6,
         label="Diabetic (Outcome = 1)",
@@ -518,7 +526,7 @@ for feature in FEATURES:
 
     divergence_rows.append({
         "Feature": feature,
-        "JS Divergence": empirical_js_divergence(x0, x1, bins=20),
+        "JS Divergence": empirical_js_divergence(x0, x1, bins=JS_BINS),
         "KS Statistic": ks_statistic(x0, x1),
     })
 
@@ -679,6 +687,7 @@ save_table(round_table(comparison_df, 4), "model_comparison.csv")
 print("\nModel comparison:")
 print(round_table(comparison_df, 4).to_string(index=False))
 
+
 # ============================================================
 # 11.1 ROC and Precision-Recall curve figures
 # ============================================================
@@ -748,6 +757,7 @@ plt.title("Precision-Recall Curve Comparison")
 plt.legend(fontsize=8)
 
 save_figure("pr_curves.png")
+
 
 # ============================================================
 # 11.2 Repeated stratified cross-validation robustness check
@@ -837,7 +847,6 @@ print("\nLaTeX rows for confusion matrix count table:")
 print_latex_rows(confusion_counts_df, ["Model", "TN", "FP", "FN", "TP"], float_decimals=0)
 
 
-
 # ============================================================
 # 13. Random Forest feature importance figure
 # ============================================================
@@ -894,14 +903,13 @@ print_latex_rows(brier_df, ["Model", "Brier Score"], float_decimals=4)
 # 15. Threshold sensitivity analysis
 # ============================================================
 
-thresholds = [0.30, 0.40, 0.50]
 threshold_rows = []
 
 for model_name, proba in [
     ("Logistic Regression", lr_proba),
     ("Random Forest", rf_proba),
 ]:
-    for threshold in thresholds:
+    for threshold in THRESHOLDS:
         pred = (proba >= threshold).astype(int)
 
         threshold_rows.append({
@@ -940,7 +948,7 @@ perm_result = permutation_importance(
     X_test,
     y_test,
     scoring="average_precision",
-    n_repeats=30,
+    n_repeats=PERMUTATION_REPEATS,
     random_state=RANDOM_STATE,
     n_jobs=-1,
 )
@@ -1020,7 +1028,6 @@ print_latex_rows(
 )
 
 
-
 # ============================================================
 # 18. Reduced feature model comparison
 # ============================================================
@@ -1045,6 +1052,31 @@ rf_red_pred = rf_red_pipe.predict(X_test_red)
 lr_red_proba = lr_red_pipe.predict_proba(X_test_red)[:, 1]
 rf_red_proba = rf_red_pipe.predict_proba(X_test_red)[:, 1]
 
+lr_red_cm = confusion_matrix(y_test_red, lr_red_pred, labels=[0, 1])
+rf_red_cm = confusion_matrix(y_test_red, rf_red_pred, labels=[0, 1])
+
+print("\nReduced Logistic Regression confusion matrix:")
+print(lr_red_cm)
+
+print("\nReduced Random Forest confusion matrix:")
+print(rf_red_cm)
+
+lr_red_tn, lr_red_fp, lr_red_fn, lr_red_tp = lr_red_cm.ravel()
+rf_red_tn, rf_red_fp, rf_red_fn, rf_red_tp = rf_red_cm.ravel()
+
+reduced_confusion_counts_df = pd.DataFrame({
+    "Model": ["Reduced Logistic Regression", "Reduced Random Forest"],
+    "TN": [lr_red_tn, rf_red_tn],
+    "FP": [lr_red_fp, rf_red_fp],
+    "FN": [lr_red_fn, rf_red_fn],
+    "TP": [lr_red_tp, rf_red_tp],
+})
+
+save_table(reduced_confusion_counts_df, "reduced_confusion_matrix_counts.csv")
+
+print("\nReduced confusion matrix counts:")
+print(reduced_confusion_counts_df.to_string(index=False))
+
 lr_red_metrics = format_metrics(y_test_red, lr_red_pred, lr_red_proba)
 rf_red_metrics = format_metrics(y_test_red, rf_red_pred, rf_red_proba)
 
@@ -1058,35 +1090,49 @@ reduced_comparison_df = pd.DataFrame({
 
 reduced_comparison_df_rounded = round_table(reduced_comparison_df, 4)
 save_table(reduced_comparison_df_rounded, "reduced_feature_comparison.csv")
+
 # Essay Table 16 style output: long-format reduced feature comparison.
+# This version reports the same main metrics as the full model comparison.
 reduced_feature_table_df = pd.DataFrame([
     {
         "Model": "Logistic Regression",
         "Feature Set": "Full features",
         "Accuracy": lr_metrics["Accuracy"],
+        "Precision": lr_metrics["Precision"],
+        "Recall": lr_metrics["Recall"],
         "F1-score": lr_metrics["F1-score"],
         "ROC-AUC": lr_metrics["ROC-AUC"],
+        "PR-AUC": lr_metrics["PR-AUC"],
     },
     {
         "Model": "Logistic Regression",
         "Feature Set": "Glucose, BMI, Age",
         "Accuracy": lr_red_metrics["Accuracy"],
+        "Precision": lr_red_metrics["Precision"],
+        "Recall": lr_red_metrics["Recall"],
         "F1-score": lr_red_metrics["F1-score"],
         "ROC-AUC": lr_red_metrics["ROC-AUC"],
+        "PR-AUC": lr_red_metrics["PR-AUC"],
     },
     {
         "Model": "Random Forest",
         "Feature Set": "Full features",
         "Accuracy": rf_metrics["Accuracy"],
+        "Precision": rf_metrics["Precision"],
+        "Recall": rf_metrics["Recall"],
         "F1-score": rf_metrics["F1-score"],
         "ROC-AUC": rf_metrics["ROC-AUC"],
+        "PR-AUC": rf_metrics["PR-AUC"],
     },
     {
         "Model": "Random Forest",
         "Feature Set": "Glucose, BMI, Age",
         "Accuracy": rf_red_metrics["Accuracy"],
+        "Precision": rf_red_metrics["Precision"],
+        "Recall": rf_red_metrics["Recall"],
         "F1-score": rf_red_metrics["F1-score"],
         "ROC-AUC": rf_red_metrics["ROC-AUC"],
+        "PR-AUC": rf_red_metrics["PR-AUC"],
     },
 ])
 
@@ -1103,7 +1149,16 @@ print(reduced_feature_table_df_rounded.to_string(index=False))
 print("\nLaTeX rows for essay reduced feature table:")
 print_latex_rows(
     reduced_feature_table_df,
-    ["Model", "Feature Set", "Accuracy", "F1-score", "ROC-AUC"],
+    [
+        "Model",
+        "Feature Set",
+        "Accuracy",
+        "Precision",
+        "Recall",
+        "F1-score",
+        "ROC-AUC",
+        "PR-AUC",
+    ],
     float_decimals=4,
 )
 
@@ -1123,37 +1178,39 @@ print_latex_rows(
     float_decimals=4,
 )
 
+
 # ============================================================
 # 19. Final message
 # ============================================================
+
 print("\nDone. Output files have been saved.")
 
 print("\nImportant table files used in the essay:")
 
 # 1. Data preprocessing and EDA tables
-print(f"- {TABLE_DIR / 'invalid_zero_counts.csv'}")              # Table 2
-print(f"- {TABLE_DIR / 'missingness_indicator_summary.csv'}")   # Table 3
-print(f"- {TABLE_DIR / 'class_distribution.csv'}")              # Table 4
-print(f"- {TABLE_DIR / 'js_divergence_rank.csv'}")              # Table 5
+print(f"- {TABLE_DIR / 'class_distribution.csv'}")                # Table 2
+print(f"- {TABLE_DIR / 'invalid_zero_counts.csv'}")               # Table 3
+print(f"- {TABLE_DIR / 'missingness_indicator_summary.csv'}")     # Table 4
+print(f"- {TABLE_DIR / 'js_divergence_rank.csv'}")                # Table 5
 
 # 2. Model performance and interpretation tables
-print(f"- {TABLE_DIR / 'lr_performance.csv'}")                  # Table 7
-print(f"- {TABLE_DIR / 'lr_odds_ratios.csv'}")                  # Table 8
-print(f"- {TABLE_DIR / 'rf_performance.csv'}")                  # Table 9
-print(f"- {TABLE_DIR / 'model_comparison.csv'}")                # Table 10
-print(f"- {TABLE_DIR / 'confusion_matrix_counts.csv'}")         # Table 11
-print(f"- {TABLE_DIR / 'cross_validation_performance.csv'}")    # Table 12
-print(f"- {TABLE_DIR / 'brier_scores.csv'}")                    # Table 13
-print(f"- {TABLE_DIR / 'threshold_sensitivity.csv'}")           # Table 14
-print(f"- {TABLE_DIR / 'divergence_importance_comparison.csv'}") # Table 15
-print(f"- {TABLE_DIR / 'reduced_feature_table_for_essay.csv'}") # Table 16
-
+print(f"- {TABLE_DIR / 'lr_performance.csv'}")                    # Table 7
+print(f"- {TABLE_DIR / 'lr_odds_ratios.csv'}")                    # Table 8
+print(f"- {TABLE_DIR / 'rf_performance.csv'}")                    # Table 9
+print(f"- {TABLE_DIR / 'model_comparison.csv'}")                  # Table 10
+print(f"- {TABLE_DIR / 'confusion_matrix_counts.csv'}")           # Table 11
+print(f"- {TABLE_DIR / 'cross_validation_performance.csv'}")      # Table 12
+print(f"- {TABLE_DIR / 'brier_scores.csv'}")                      # Table 13
+print(f"- {TABLE_DIR / 'threshold_sensitivity.csv'}")             # Table 14
+print(f"- {TABLE_DIR / 'divergence_importance_comparison.csv'}")  # Table 15
+print(f"- {TABLE_DIR / 'reduced_feature_table_for_essay.csv'}")   # Table 16
 
 print("\nImportant figure files used in the essay:")
 
-print(f"- {FIGURE_DIR / 'glucose_distribution_by_outcome.png'}")       # Figure 1(a)
-print(f"- {FIGURE_DIR / 'bloodpressure_distribution_by_outcome.png'}") # Figure 1(b)
-print(f"- {FIGURE_DIR / 'correlation_heatmap.png'}")                   # Figure 2
-print(f"- {FIGURE_DIR / 'rf_importance.png'}")                         # Figure 3
-print(f"- {FIGURE_DIR / 'roc_curves.png'}")                            # Figure 4(a)
-print(f"- {FIGURE_DIR / 'pr_curves.png'}")                             # Figure 4(b)
+print(f"- {FIGURE_DIR / 'glucose_distribution_by_outcome.png'}")        # Figure 1(a)
+print(f"- {FIGURE_DIR / 'bloodpressure_distribution_by_outcome.png'}")  # Figure 1(b)
+print(f"- {FIGURE_DIR / 'correlation_heatmap.png'}")                    # Figure 2
+print(f"- {FIGURE_DIR / 'rf_importance.png'}")                          # Figure 3
+print(f"- {FIGURE_DIR / 'roc_curves.png'}")                             # Figure 4(a)
+print(f"- {FIGURE_DIR / 'pr_curves.png'}")                              # Figure 4(b)
+
